@@ -28,15 +28,39 @@
 
 import sys
 import subprocess
+import re
+import time
+import ConfigParser
+import sre_constants
+
+
+CONFIG_FILE = '/etc/mpsr.conf'
 
 def deny_access(url):
     return 'http://192.168.2.1/access_denied.html'
 
 def clamav(url):
-    process = subprocess.Popen('/usr/local/bin/squidclamav', shell=True,
-            stdout=subprocess.PIPE)
+    process = subprocess.Popen('/usr/local/bin/squidclamav -c /usr/local/etc/squidclamav.conf', shell=False,
+            stdout=subprocess.PIPE,stdin=subprocess.PIPE)
     process.communicate(url)
-    return process.stdout.read()
+    result = process.stdout.read()
+    print ("clamav result", result)
+    return result
+
+def redirect(conf, rule):
+    '''
+    Redirects to a given url
+    '''
+    if not conf.has_option(rule, 'url'):
+        return
+    newurl = conf.get(rule, 'url')
+    if not newurl:
+        return
+    return newurl
+
+METHODS = {
+        'redirect': redirect,
+        }
 
 #
 # RULES is tuple of tuples.
@@ -54,7 +78,11 @@ RULES = (
         ('aTube','.*aTube.*', deny_access),
         ('Conduit','http.?://.*conduit.com.*', deny_access),
         ('facemods','http.?://.*facemoods.com.*', deny_access),
-        ('Everyting Else', '.*', lambda url: call_subprocess(url, )),
+        ('boosters','http.?://.*download-boosters.*', deny_access),
+        ('search.bearshare','http.?://search.bearshare\..{2,3}', lambda url: 'http://www.la-uno.com/html/index.php'),
+        ('bearshare','http.?://.*bearshare\..{2,3}', deny_access),
+        #('Everyting Else', '.*', clamav),
+        ('Everyting Else', '.*', lambda url: url),
         )
 
 
@@ -74,18 +102,73 @@ def handle_rule(rule, line):
         func = rule[2]
         #If function is defective then do nothing...
         try:
+            #print "procesando ", rule[0]
             result = func(line)
-            break
-        except:
+            return True, result
+        except Exception, e:
+            #print e
             pass
-    return 
+    return False, result 
 
-while 1:
-    #Get the url
-    line = sys.stdin.readline().strip()
-    for rule in RULES:
-        result  = handle_rule(rule, line)
-        sys.stdout.write(result+"\n")
+def _handle_config_rules(line, conf):
+    for section in conf.sections():
+        #Useless rule
+        if not conf.has_option(section, 'method'): 
+            continue
+        method =  conf.get(section, 'method')
+        methodobj = METHODS.get(method, None)
+        #Useless rule
+        if not callable(methodobj): 
+            continue
+        #Useless rule
+        if not conf.has_option(section, 'match'): 
+            continue
+        match = conf.get(section, 'match')
+        #Useless rule
+        if not match: 
+            continue
+        try:
+            pattern = re.compile(match, re.I)
+        except sre_constants.error, e:
+            #An invalid regular expression just happened.
+            continue
+        matches =  []
+        c = re.findall(pattern, line)
+        # Rule does not apply
+        if not c: 
+            continue
+        try:
+            return methodobj(conf, section)
+        except:
+            continue
+
+def run():
+    while 1:
+        #Get the url
+        line = sys.stdin.readline().strip()
+        if not line:
+            #print 1
+            time.sleep(0.1)
+            continue
+        #Open the configuration file.
+        conf = ConfigParser.ConfigParser()
+        if not conf.read(CONFIG_FILE):
+            #Apply default rules.
+            for rule in RULES:
+                result  = handle_rule(rule, line)
+                if result[0]:
+                    sys.stdout.write(result[1]+"\n")
+                    sys.stdout.flush()
+                    break
+        try:
+            result = _handle_config_rules(line, conf)
+            if not result:
+                result = line
+        except:
+            result = line
+        sys.stdout.write(result + "\n")
         sys.stdout.flush()
 
 
+if __name__ == '__main__':
+    run()
